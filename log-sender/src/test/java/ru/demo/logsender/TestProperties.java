@@ -15,7 +15,7 @@ public final class TestProperties {
     }
 
     public static LogSenderProperties properties(URI opensearchUrl, String index) {
-        return new LogSenderProperties(opensearchUrl, index, 10, 10,
+        return new LogSenderProperties(opensearchUrl, index, 10, 10, 3,
                 List.of("order-service", "payment-service"), Duration.ofSeconds(1), Duration.ofSeconds(5));
     }
 }

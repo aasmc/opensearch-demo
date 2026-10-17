@@ -9,7 +9,8 @@
 4. дашборд **Logs monitoring** с автообновлением раз в 5 секунд;
 5. SMTP-отправитель и email-канал в плагине Notifications (почта уходит в MailHog);
 6. монитор Alerting, который присылает письмо, когда в `event_message` появляется фраза
-   **"This is a very important message"**.
+   **"This is a very important message"**, а среди логов того же `process_id` есть запись уровня `WARN` или
+   `ERROR`.
 
 Названия пунктов меню и кнопок даны так, как они выглядят в интерфейсе (на английском).
 
@@ -47,7 +48,8 @@ docker compose up -d opensearch opensearch-dashboards mailhog
 ### 0.2. Создать индекс с правильным маппингом
 
 Индекс и его маппинг — это не настройка UI, но без них поиск фразы работать не будет. Поле `event_message`
-должно иметь тип `text`, тогда фраза находится внутри длинного сообщения.
+должно иметь тип `text`, тогда фраза находится внутри длинного сообщения. Поле `log_level` (уровень SLF4J:
+`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`) должно иметь тип `keyword`, по нему монитор ищет точные значения.
 
 1. Откройте меню (☰ слева вверху) → **Management** → **Dev Tools**.
 2. Вставьте в консоль и выполните (кнопка ▶ справа от запроса или `Ctrl/Cmd + Enter`):
@@ -65,6 +67,7 @@ docker compose up -d opensearch opensearch-dashboards mailhog
            "process_id":      { "type": "keyword" },
            "event_timestamp": { "type": "date", "format": "strict_date_optional_time||epoch_millis" },
            "service_name":    { "type": "keyword" },
+           "log_level":       { "type": "keyword" },
            "event_message":   { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 1024 } } }
          }
        }
@@ -84,7 +87,7 @@ docker compose up -d opensearch opensearch-dashboards mailhog
 docker compose up -d --no-deps log-sender     # генератор: 10 сообщений в секунду
 # или вручную:
 scripts/send-logs.sh --count 3
-scripts/send-logs.sh --important
+scripts/send-logs.sh --important --count 3   # третья пачка содержит ещё и WARN/ERROR
 ```
 
 > Если запустить `docker compose up -d` целиком, контейнер `opensearch-init` создаст все объекты
@@ -420,9 +423,28 @@ email-канал, который его использует.
 
 ## 6. Монитор (Alerting)
 
-Используем тип **Per document monitor**. Он проверяет каждый новый документ ровно один раз и создаёт
-отдельный алерт на каждый найденный документ. Поэтому в письмо можно вывести поля конкретного сообщения,
-а дублей и пропусков на границах интервала не бывает.
+Условие алерта: в логах есть фраза **"This is a very important message"** И среди логов того же `process_id`
+есть хотя бы одна запись уровня `WARN` или `ERROR`. Per document monitor так не умеет: он проверяет каждый
+документ отдельно и не связывает документы между собой. Поэтому используем **Per bucket monitor**: он
+группирует документы по `process_id` (один бакет на процесс) и проверяет условие для каждого бакета.
+
+Как работает монитор:
+
+- раз в минуту он берёт документы за последние **2 минуты**, в которых есть фраза или уровень `WARN`/`ERROR`.
+  Окно вдвое длиннее интервала, поэтому документы на стыке запусков не теряются;
+- композитная агрегация `composite_agg` разбивает их на бакеты по `process_id`;
+- вычисляемые поля (`derived`) `has_important_phrase` и `is_warn_or_error` дают каждому документу 0 или 1, а
+  метрики `max` по ним показывают, есть ли в бакете фраза и есть ли проблема;
+- триггер срабатывает на бакет, где обе метрики больше 0. Алерт привязан к `process_id`: пока бакет виден в
+  окне, алерт остаётся активным (*deduplicated*), и письмо уходит только при его появлении (*new*). Поэтому на
+  каждый процесс приходит одно письмо.
+
+> **Почему `derived`, а не `filter`-агрегации.** Плагин Alerting берёт примеры документов
+> (`sample_documents`) для письма только из агрегации с именем ровно `composite_agg`, у которой все
+> вложенные агрегации — метрики вида `{"max": {"field": "..."}}`. С `filter`-агрегациями внутри
+> монитор работает, но падает при сборе примеров, и письмо приходит без документов.
+
+Визуальный редактор не поддерживает такой запрос, поэтому монитор задаётся в **Extraction query editor**.
 
 ### 6.1. Monitor details
 
@@ -430,82 +452,177 @@ email-канал, который его использует.
 2. Вкладка **Monitors** → **Create monitor**.
 3. Заполните:
    - **Monitor name**: `important-message-monitor`
-   - **Monitor type**: **Per document monitor**
-   - **Monitor defining method**: **Visual editor**
+   - **Monitor type**: **Per bucket monitor**
+   - **Monitor defining method**: **Extraction query editor**
    - **Schedule**:
      - **Frequency**: **By interval**
      - **Run every**: `1` **Minute(s)**. Это минимально возможный интервал, меньше минуты Alerting не позволяет.
 
-### 6.2. Select data
+### 6.2. Data source
 
-- **Index**: начните вводить `app-logs` и выберите индекс из списка. Можно указать и шаблон `app-logs*`.
+- **Index**: начните вводить `app-logs` и выберите индекс из списка.
 
 ### 6.3. Query
 
-| Поле | Значение |
-|---|---|
-| **Query name** | `important-phrase` |
-| **Field** | `event_message`. Выберите поле из группы **text**, не `event_message.keyword` |
-| Оператор | **is** |
-| Значение | `This is a very important message` (без кавычек) |
-| **Tags - optional** | **+ Add tag** → `important` (необязательно) |
+В поле **Define extraction query** удалите текст по умолчанию и вставьте запрос:
 
-Для text-поля оператор **is** сохраняется как запрос фразы `event_message:"This is a very important message"`.
-Такой запрос находит фразу в любом месте сообщения. Как убедиться, что запрос сохранился именно так,
-описано в шаге 6.7.
+```json
+{
+  "size": 0,
+  "derived": {
+    "has_important_phrase": {
+      "type": "long",
+      "script": {
+        "source": "emit(doc['event_message.keyword'].size() > 0 && doc['event_message.keyword'].value.toLowerCase().contains('this is a very important message') ? 1 : 0)"
+      }
+    },
+    "is_warn_or_error": {
+      "type": "long",
+      "script": {
+        "source": "emit(doc['log_level'].size() > 0 && (doc['log_level'].value == 'WARN' || doc['log_level'].value == 'ERROR') ? 1 : 0)"
+      }
+    }
+  },
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "range": {
+            "event_timestamp": {
+              "from": "{{period_end}}||-2m",
+              "to": "{{period_end}}",
+              "include_lower": true,
+              "include_upper": true,
+              "format": "epoch_millis"
+            }
+          }
+        },
+        {
+          "bool": {
+            "should": [
+              {
+                "match_phrase": {
+                  "event_message": "This is a very important message"
+                }
+              },
+              {
+                "terms": {
+                  "log_level": [
+                    "WARN",
+                    "ERROR"
+                  ]
+                }
+              }
+            ],
+            "minimum_should_match": 1
+          }
+        }
+      ]
+    }
+  },
+  "aggregations": {
+    "composite_agg": {
+      "composite": {
+        "size": 1000,
+        "sources": [
+          {
+            "process_id": {
+              "terms": {
+                "field": "process_id"
+              }
+            }
+          }
+        ]
+      },
+      "aggregations": {
+        "important": {
+          "max": {
+            "field": "has_important_phrase"
+          }
+        },
+        "problems": {
+          "max": {
+            "field": "is_warn_or_error"
+          }
+        }
+      }
+    }
+  }
+}
+```
 
-Можно раскрыть **Preview query and performance** и проверить, что запрос выполняется без ошибок.
+`{{period_end}}` — время запуска монитора, Alerting подставит его сам. Кнопка **Run** покажет ответ: в
+`aggregations.composite_agg.buckets` по бакету на процесс, у каждого — значения `important` и `problems`.
 
 ### 6.4. Trigger
 
 1. Нажмите **Add trigger**.
 2. Заполните:
-   - **Trigger name**: `important-message-found`
+   - **Trigger name**: `important-message-with-problems`
    - **Severity level**: **1 (Highest)**
-   - **Trigger conditions** → **Specify queries or tags**: выберите `important-phrase` из группы **Queries**
-     (или тег `important`).
+   - **Trigger condition**: удалите текст по умолчанию и вставьте:
+
+     ```json
+     {
+       "buckets_path": {
+         "important": "important",
+         "problems": "problems"
+       },
+       "parent_bucket_path": "composite_agg",
+       "script": {
+         "source": "params.important > 0 && params.problems > 0",
+         "lang": "painless"
+       }
+     }
+     ```
+
+     `buckets_path` связывает переменные скрипта с метриками бакета, `parent_bucket_path` указывает на
+     агрегацию с бакетами. Кнопка **Preview condition response** покажет бакеты, на которые сработает триггер.
 
 ### 6.5. Action (письмо)
 
-Блок **Actions (1)** с действием **Notification** уже добавлен вместе с триггером.
+Блок **Actions** с действием **Notification** уже добавлен вместе с триггером.
 
 1. **Action name**: `send-email`
 2. **Channels**: выберите **[Channel] Important message email**
-3. **Message subject**: `[OpenSearch] Important message detected`
+3. **Message subject**: `[OpenSearch] Important message with WARN/ERROR detected`
 4. **Message**: удалите текст по умолчанию и вставьте шаблон:
 
    ```
-   Monitor {{ctx.monitor.name}} found an important message in the logs.
+   Monitor {{ctx.monitor.name}} found an important message and WARN/ERROR records in the logs of the same process.
 
    Trigger: {{ctx.trigger.name}} (severity {{ctx.trigger.severity}})
    Detected at: {{ctx.periodEnd}}
-   {{#ctx.alerts}}{{#sample_documents}}
+   {{#ctx.newAlerts}}
+   process_id: {{bucket_keys}}
+   {{#sample_documents}}
    ----------------------------------------
-   process_id:      {{_source.process_id}}
+   log_level:       {{_source.log_level}}
    service_name:    {{_source.service_name}}
    event_timestamp: {{_source.event_timestamp}}
    event_message:   {{_source.event_message}}
    index/doc id:    {{_index}}/{{_id}}
-   {{/sample_documents}}{{/ctx.alerts}}
+   {{/sample_documents}}
+   {{/ctx.newAlerts}}
    ```
 
    Что здесь используется:
-   - `ctx.alerts` — алерты, созданные в этом запуске монитора (есть только у per document monitor);
-   - `sample_documents` — найденные документы, `_source` содержит все их поля;
+   - `ctx.newAlerts` — новые алерты этого запуска (у per bucket monitor есть ещё `ctx.dedupedAlerts` и
+     `ctx.completedAlerts`);
+   - `bucket_keys` — ключ бакета, то есть `process_id`;
+   - `sample_documents` — документы бакета: сообщение с фразой и записи `WARN`/`ERROR` (до 10 штук);
    - `{{#...}} ... {{/...}}` — цикл Mustache по списку.
 
-5. **Action configuration** → **Perform action**: выберите **Per alert**. Тогда на каждый найденный документ
-   придёт отдельное письмо.
-   - Если под **Per alert** появится выбор **Actionable alerts**, оставьте его пустым или выберите **New**.
-   - Вариант **Per execution** (стоит по умолчанию) присылает одно письмо за запуск со списком всех
-     найденных документов. Шаблон выше работает и в этом режиме.
+5. **Action configuration** → **Perform action**: выберите **Per alert**, в **Actionable alerts** оставьте
+   только **New**. Тогда на каждый процесс придёт одно письмо. Если добавить **De-duplicated**, письмо будет
+   повторяться каждую минуту, пока процесс виден в окне.
 6. *(Необязательно)* Нажмите **Send test message** и проверьте, что письмо пришло в MailHog. В тестовом
-   письме блок с документами будет пустым: это нормально, реальных алертов ещё нет.
+   письме блока с процессом не будет: это нормально, реальных алертов ещё нет.
 
 ### 6.6. Создание
 
 Прокрутите вниз и нажмите **Create**. Откроется страница монитора. Состояние должно быть **Enabled**,
-тип **Per document**.
+тип **Per bucket**.
 
 ### 6.7. Проверка сохранённого монитора (рекомендуется)
 
@@ -517,31 +634,37 @@ email-канал, который его использует.
    ```
 
 3. Проверьте в ответе:
-   - `monitor_type`: `"doc_level_monitor"`;
-   - `inputs[0].doc_level_input.queries[0].query` содержит `event_message:"This is a very important message"`;
+   - `monitor_type`: `"bucket_level_monitor"`;
+   - в `inputs[0].search.query` есть блок `derived` и агрегация `composite_agg`;
+   - `triggers[0].bucket_level_trigger.condition.parent_bucket_path`: `"composite_agg"`;
    - `schedule.period`: `interval: 1`, `unit: "MINUTES"`;
-   - у действия `action_execution_policy.action_execution_scope.per_alert`.
+   - у действия `action_execution_policy.action_execution_scope.per_alert.actionable_alerts`: `["NEW"]`.
 
 Для сравнения: эталонное определение того же монитора, которое автоматическая настройка создаёт через API,
-лежит в [opensearch/init/monitor.json](opensearch/init/monitor.json).
+лежит в [opensearch/init/monitor.json](opensearch/init/monitor.json). Его можно и просто отправить из Dev Tools:
+`POST _plugins/_alerting/monitors` с содержимым файла в теле запроса.
 
 ---
 
 ## 7. Проверка всей цепочки
 
-1. Отправьте важное сообщение (или подождите, пока его отправит `log-sender`, это происходит раз в 10 секунд):
+1. Отправьте три важные пачки (или подождите, пока их отправит `log-sender`: важная пачка уходит раз в
+   10 секунд, а каждая третья из них, то есть раз в 30 секунд, содержит ещё и `WARN`/`ERROR`):
 
    ```bash
-   scripts/send-logs.sh --important
+   scripts/send-logs.sh --important --count 3
    ```
 
-   Скрипт выведет `process_id` пачки.
+   Скрипт выведет `process_id` каждой пачки. Первые две помечены `[IMPORTANT]`, третья —
+   `[IMPORTANT_WITH_PROBLEM]`.
 2. **Дашборд** (Dashboards → Logs monitoring): в течение ~5 секунд счётчик Important messages
    увеличится, а сообщение появится в таблице.
 3. **Монитор**: Alerting → Monitors → `important-message-monitor`. После ближайшего запуска (≤ 1 минуты)
    в истории появятся алерты.
-4. **Почта**: откройте MailHog (http://localhost:8025). Придёт письмо *"[OpenSearch] Important message detected"*
-   с тем же `process_id`, что вывел скрипт.
+4. **Почта**: откройте MailHog (http://localhost:8025). Придёт письмо
+   *"[OpenSearch] Important message with WARN/ERROR detected"* только для пачки `[IMPORTANT_WITH_PROBLEM]`.
+   В письме будут её `process_id`, сообщение с фразой и запись `WARN`/`ERROR`. По первым двум пачкам писем
+   не будет: в них есть фраза, но нет `WARN`/`ERROR`.
 
 Ожидаемая задержка от записи сообщения до письма — до ~1 минуты (интервал запуска монитора).
 
@@ -557,9 +680,11 @@ email-канал, который его использует.
 | Визуализации пишут *Could not locate that index-pattern-field* | Index pattern создан без полей или до появления документов. Dashboards Management → Index patterns → `app-logs*` → кнопка **Refresh field list** (↻) |
 | **Send test message** в канале падает с ошибкой подключения | В **Host** указан `localhost` вместо `mailhog`, или **Encryption method** не **None** |
 | Sender name не принимается | Допустимы только строчные латинские буквы, цифры, `-` и `_` |
-| Монитор не создаётся: индекс не найден | Per document monitor требует существующий индекс. Создайте `app-logs` (шаг 0.2) |
+| Монитор не создаётся: индекс не найден | Создайте `app-logs` (шаг 0.2) до создания монитора |
+| Триггер не срабатывает, хотя фраза и `WARN`/`ERROR` есть | Проверьте маппинг: `GET app-logs/_mapping`, у `log_level` должен быть тип `keyword`. Если индекс создан до появления поля, добавьте его: `PUT app-logs/_mapping` с `{"properties": {"log_level": {"type": "keyword"}}}` |
 | Монитор работает, но писем нет | Проверьте канал (**Send test message**). Проверьте, что триггер ссылается на нужный query. На странице монитора посмотрите **Errors** и состояние алертов. Для ручного прогона без отправки писем: `POST _plugins/_alerting/monitors/<ID>/_execute?dryrun=true` в Dev Tools |
-| В письме пустые поля документа | Шаблон должен обходить `{{#ctx.alerts}}{{#sample_documents}}...{{/sample_documents}}{{/ctx.alerts}}`. Тестовое письмо из формы всегда без документов |
+| В письме есть `process_id`, но нет документов | Агрегация должна называться ровно `composite_agg`, а вложенные в неё агрегации должны быть метриками по полю (`max`, а не `filter`). В логах OpenSearch при этом есть `Error retrieving sample documents`. Тестовое письмо из формы всегда без документов |
+| На один процесс приходит несколько писем | В **Actionable alerts** выбрано не только **New** |
 | Дашборд не обновляется сам | Дашборд сохранён без **Store time with dashboard**. Включите автообновление (4.3) и пересохраните с этим переключателем (4.4) |
 | Письмо приходит не сразу | Это ожидаемо: монитор запускается раз в минуту, чаще OpenSearch Alerting не позволяет |
 

@@ -9,6 +9,7 @@ import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.slf4j.event.Level;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
@@ -20,6 +21,7 @@ import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import ru.demo.logsender.TestProperties;
+import ru.demo.logsender.generator.BatchType;
 import ru.demo.logsender.generator.LogBatchFactory;
 import ru.demo.logsender.generator.LogEvent;
 import tools.jackson.databind.JsonNode;
@@ -70,8 +72,8 @@ class OpenSearchBulkClientIntegrationTest {
     }
 
     @Test
-    void indexesBatchWithStrictMappingAndFindsImportantPhrase() {
-        List<LogEvent> batch = batchFactory.createBatch(true);
+    void indexesBatchWithStrictMappingAndFindsImportantPhraseAndProblemLevel() {
+        List<LogEvent> batch = batchFactory.createBatch(BatchType.IMPORTANT_WITH_PROBLEM);
 
         BulkResult result = bulkClient.send(batch);
         refresh();
@@ -81,12 +83,16 @@ class OpenSearchBulkClientIntegrationTest {
                 .isEqualTo(10);
         assertThat(count("{\"query\":{\"match_phrase\":{\"event_message\":\"" + LogBatchFactory.IMPORTANT_PHRASE + "\"}}}"))
                 .isEqualTo(1);
+        assertThat(count("{\"query\":{\"bool\":{\"filter\":["
+                + "{\"term\":{\"process_id\":\"" + batch.getFirst().processId() + "\"}},"
+                + "{\"terms\":{\"log_level\":[\"WARN\",\"ERROR\"]}}]}}}"))
+                .isEqualTo(1);
     }
 
     @Test
     void reportsPerDocumentFailures() {
         // Индекс вне шаблона app-logs*: без полей event_* при dynamic=strict документ будет отклонён
-        LogEvent invalid = new LogEvent("process-1", null, "order-service", "Order was created");
+        LogEvent invalid = new LogEvent("process-1", null, "order-service", Level.INFO, "Order was created");
         opensearch.put()
                 .uri("/strict-test-index")
                 .contentType(MediaType.APPLICATION_JSON)

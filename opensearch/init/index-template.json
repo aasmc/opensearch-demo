@@ -13,6 +13,7 @@
         "process_id": { "type": "keyword" },
         "event_timestamp": { "type": "date", "format": "strict_date_optional_time||epoch_millis" },
         "service_name": { "type": "keyword" },
+        "log_level": { "type": "keyword" },
         "event_message": {
           "type": "text",
           "fields": { "keyword": { "type": "keyword", "ignore_above": 1024 } }

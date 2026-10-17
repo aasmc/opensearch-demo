@@ -1,50 +1,140 @@
 {
   "type": "monitor",
-  "monitor_type": "doc_level_monitor",
+  "monitor_type": "bucket_level_monitor",
   "name": "important-message-monitor",
   "enabled": true,
   "schedule": {
-    "period": { "interval": 1, "unit": "MINUTES" }
+    "period": {
+      "interval": 1,
+      "unit": "MINUTES"
+    }
   },
   "inputs": [
     {
-      "doc_level_input": {
-        "description": "Сообщения логов, содержащие фразу 'This is a very important message'",
-        "indices": ["app-logs"],
-        "queries": [
-          {
-            "id": "important-phrase",
-            "name": "important-phrase",
-            "query": "event_message:\"This is a very important message\"",
-            "tags": ["important"]
+      "search": {
+        "indices": [
+          "app-logs"
+        ],
+        "query": {
+          "size": 0,
+          "derived": {
+            "has_important_phrase": {
+              "type": "long",
+              "script": {
+                "source": "emit(doc['event_message.keyword'].size() > 0 && doc['event_message.keyword'].value.toLowerCase().contains('this is a very important message') ? 1 : 0)"
+              }
+            },
+            "is_warn_or_error": {
+              "type": "long",
+              "script": {
+                "source": "emit(doc['log_level'].size() > 0 && (doc['log_level'].value == 'WARN' || doc['log_level'].value == 'ERROR') ? 1 : 0)"
+              }
+            }
+          },
+          "query": {
+            "bool": {
+              "filter": [
+                {
+                  "range": {
+                    "event_timestamp": {
+                      "from": "{{period_end}}||-2m",
+                      "to": "{{period_end}}",
+                      "include_lower": true,
+                      "include_upper": true,
+                      "format": "epoch_millis"
+                    }
+                  }
+                },
+                {
+                  "bool": {
+                    "should": [
+                      {
+                        "match_phrase": {
+                          "event_message": "This is a very important message"
+                        }
+                      },
+                      {
+                        "terms": {
+                          "log_level": [
+                            "WARN",
+                            "ERROR"
+                          ]
+                        }
+                      }
+                    ],
+                    "minimum_should_match": 1
+                  }
+                }
+              ]
+            }
+          },
+          "aggregations": {
+            "composite_agg": {
+              "composite": {
+                "size": 1000,
+                "sources": [
+                  {
+                    "process_id": {
+                      "terms": {
+                        "field": "process_id"
+                      }
+                    }
+                  }
+                ]
+              },
+              "aggregations": {
+                "important": {
+                  "max": {
+                    "field": "has_important_phrase"
+                  }
+                },
+                "problems": {
+                  "max": {
+                    "field": "is_warn_or_error"
+                  }
+                }
+              }
+            }
           }
-        ]
+        }
       }
     }
   ],
   "triggers": [
     {
-      "document_level_trigger": {
-        "name": "important-message-found",
+      "bucket_level_trigger": {
+        "name": "important-message-with-problems",
         "severity": "1",
         "condition": {
-          "script": { "source": "query[name=important-phrase]", "lang": "painless" }
+          "buckets_path": {
+            "important": "important",
+            "problems": "problems"
+          },
+          "parent_bucket_path": "composite_agg",
+          "script": {
+            "source": "params.important > 0 && params.problems > 0",
+            "lang": "painless"
+          }
         },
         "actions": [
           {
             "name": "send-email",
             "destination_id": "important-message-email",
             "subject_template": {
-              "source": "[OpenSearch] Important message detected",
+              "source": "[OpenSearch] Important message with WARN/ERROR detected",
               "lang": "mustache"
             },
             "message_template": {
-              "source": "Monitor {{ctx.monitor.name}} found an important message in the logs.\n\nTrigger: {{ctx.trigger.name}} (severity {{ctx.trigger.severity}})\nDetected at: {{ctx.periodEnd}}\n{{#ctx.alerts}}{{#sample_documents}}\n----------------------------------------\nprocess_id:      {{_source.process_id}}\nservice_name:    {{_source.service_name}}\nevent_timestamp: {{_source.event_timestamp}}\nevent_message:   {{_source.event_message}}\nindex/doc id:    {{_index}}/{{_id}}\n{{/sample_documents}}{{/ctx.alerts}}",
+              "source": "Monitor {{ctx.monitor.name}} found an important message and WARN/ERROR records in the logs of the same process.\n\nTrigger: {{ctx.trigger.name}} (severity {{ctx.trigger.severity}})\nDetected at: {{ctx.periodEnd}}\n{{#ctx.newAlerts}}\nprocess_id: {{bucket_keys}}\n{{#sample_documents}}\n----------------------------------------\nlog_level:       {{_source.log_level}}\nservice_name:    {{_source.service_name}}\nevent_timestamp: {{_source.event_timestamp}}\nevent_message:   {{_source.event_message}}\nindex/doc id:    {{_index}}/{{_id}}\n{{/sample_documents}}\n{{/ctx.newAlerts}}",
               "lang": "mustache"
             },
             "action_execution_policy": {
               "action_execution_scope": {
-                "per_alert": { "actionable_alerts": [] }
+                "per_alert": {
+                  "actionable_alerts": [
+                    "NEW"
+                  ]
+                }
               }
             }
           }

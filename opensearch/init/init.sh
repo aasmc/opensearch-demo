@@ -71,11 +71,20 @@ upsert_notification() {
   fi
 }
 
-find_monitor_id() {
+# find_monitor — печатает "<id> <monitor_type>" монитора $MONITOR_NAME или пустую строку.
+find_monitor() {
   # Индекс конфигурации Alerting создаётся при первом мониторе, поэтому ошибку поиска считаем «не найден».
-  json POST "$OPENSEARCH_URL/_plugins/_alerting/monitors/_search" \
-    -d "{\"query\": {\"match_phrase\": {\"monitor.name\": \"$MONITOR_NAME\"}}}" 2> /dev/null \
-    | grep -o '"_id":"[^"]*"' | head -n 1 | cut -d '"' -f 4 || true
+  found=$(json POST "$OPENSEARCH_URL/_plugins/_alerting/monitors/_search" \
+    -d "{\"query\": {\"match_phrase\": {\"monitor.name\": \"$MONITOR_NAME\"}}}" 2> /dev/null || true)
+  id=$(printf '%s' "$found" | grep -o '"_id":"[^"]*"' | head -n 1 | cut -d '"' -f 4) || true
+  type=$(printf '%s' "$found" | grep -o '"monitor_type":"[^"]*"' | head -n 1 | cut -d '"' -f 4) || true
+  [ -n "$id" ] && echo "$id $type"
+  return 0
+}
+
+create_monitor() {
+  json POST "$OPENSEARCH_URL/_plugins/_alerting/monitors" -d @"$INIT_DIR/monitor.json" \
+    | grep -o '"_id":"[^"]*"' | head -n 1 | cut -d '"' -f 4
 }
 
 wait_for "OpenSearch" "$OPENSEARCH_URL/_cluster/health?wait_for_status=yellow&timeout=5s"
@@ -85,7 +94,10 @@ wait_for "OpenSearch Dashboards" "$DASHBOARDS_URL/api/status"
 json PUT "$OPENSEARCH_URL/_index_template/app-logs" -d @"$INIT_DIR/index-template.json" > /dev/null
 log "index template 'app-logs' applied"
 if exists "$OPENSEARCH_URL/$INDEX"; then
-  log "index '$INDEX' already exists"
+  # Шаблон применяется только к новым индексам. Индекс, созданный до появления поля log_level, отклонял бы
+  # документы с ним (dynamic=strict), поэтому добавляем поле явно; повторный вызов ничего не меняет.
+  json PUT "$OPENSEARCH_URL/$INDEX/_mapping" -d '{"properties": {"log_level": {"type": "keyword"}}}' > /dev/null
+  log "index '$INDEX' already exists, mapping updated"
 else
   request PUT "$OPENSEARCH_URL/$INDEX" > /dev/null
   log "index '$INDEX' created"
@@ -95,15 +107,21 @@ fi
 upsert_notification "$SMTP_ACCOUNT_ID" "$INIT_DIR/smtp-account.json"
 upsert_notification "$EMAIL_CHANNEL_ID" "$INIT_DIR/email-channel.json"
 
-# 3. Alerting: монитор на важную фразу
-monitor_id=$(find_monitor_id)
-if [ -n "$monitor_id" ]; then
+# 3. Alerting: монитор на важную фразу вместе с WARN/ERROR в том же процессе
+monitor_type=$(grep -o '"monitor_type": *"[^"]*"' "$INIT_DIR/monitor.json" | cut -d '"' -f 4)
+existing=$(find_monitor)
+monitor_id=${existing%% *}
+if [ -z "$existing" ]; then
+  monitor_id=$(create_monitor)
+  log "monitor '$MONITOR_NAME' created (id=$monitor_id)"
+elif [ "${existing#* }" = "$monitor_type" ]; then
   json PUT "$OPENSEARCH_URL/_plugins/_alerting/monitors/$monitor_id" -d @"$INIT_DIR/monitor.json" > /dev/null
   log "monitor '$MONITOR_NAME' updated (id=$monitor_id)"
 else
-  monitor_id=$(json POST "$OPENSEARCH_URL/_plugins/_alerting/monitors" -d @"$INIT_DIR/monitor.json" \
-    | grep -o '"_id":"[^"]*"' | head -n 1 | cut -d '"' -f 4)
-  log "monitor '$MONITOR_NAME' created (id=$monitor_id)"
+  # Alerting не умеет менять тип монитора через update, поэтому старый монитор пересоздаём.
+  request DELETE "$OPENSEARCH_URL/_plugins/_alerting/monitors/$monitor_id" > /dev/null
+  monitor_id=$(create_monitor)
+  log "monitor '$MONITOR_NAME' recreated as $monitor_type (id=$monitor_id)"
 fi
 
 # 4. Dashboards: index pattern, поиски, визуализации, дашборд

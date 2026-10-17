@@ -9,6 +9,7 @@ log-sender:
   index: app-logs
   batch-size: 10
   important-every-nth-batch: 10
+  problem-every-nth-important-batch: 3
   fixed-rate-ms: 1000
   connect-timeout: 500ms
   read-timeout: 900ms
