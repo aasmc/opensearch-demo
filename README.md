@@ -79,7 +79,8 @@ Discover (index pattern `app-logs*`, сохранённые поиски «All l
 На каждый такой процесс приходит одно письмо на `oncall@opensearch-demo.local` через канал Notifications
 `important-message-email`: пока процесс виден в окне, алерт остаётся активным и повторно не отправляется. В
 письме указаны `process_id` и найденные документы процесса — сообщение с фразой и записи `WARN`/`ERROR` — с
-полями `log_level`, `service_name`, `event_timestamp`, `event_message` и id документа.
+полями `log_level`, `service_name`, `event_timestamp`, `event_message` и id документа, а также ссылка на
+Discover со всеми логами процесса за ±10 минут от времени алерта.
 
 Подробный разбор запроса монитора — что делает каждая его часть, почему она нужна и какую нагрузку даёт на
 OpenSearch, со ссылками на документацию и исходный код — в [MONITOR_QUERY.md](MONITOR_QUERY.md). Ручная

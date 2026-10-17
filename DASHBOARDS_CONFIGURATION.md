@@ -595,6 +595,8 @@ email-канал, который его использует.
    Detected at: {{ctx.periodEnd}}
    {{#ctx.newAlerts}}
    process_id: {{bucket_keys}}
+   All logs of this process in Discover (+-10 minutes around the alert):
+   http://localhost:5601/app/data-explorer/discover#?_a=(discover:(columns:!(log_level,service_name,event_message),sort:!()),metadata:(indexPattern:app-logs,view:discover))&_g=(filters:!(),time:(from:%27{{ctx.periodEnd}}%7C%7C-10m%27,to:%27{{ctx.periodEnd}}%7C%7C%2B10m%27))&_q=(filters:!(),query:(language:kuery,query:%27process_id:%22{{bucket_keys}}%22%27))
    {{#sample_documents}}
    ----------------------------------------
    log_level:       {{_source.log_level}}
@@ -610,7 +612,15 @@ email-канал, который его использует.
    - `ctx.newAlerts` — новые алерты этого запуска (у per bucket monitor есть ещё `ctx.dedupedAlerts` и
      `ctx.completedAlerts`);
    - `bucket_keys` — ключ бакета, то есть `process_id`;
-   - `sample_documents` — документы бакета: сообщение с фразой и записи `WARN`/`ERROR` (до 10 штук);
+   - ссылка открывает Discover с запросом `process_id:"<id>"` по index pattern `app-logs` и интервалом ±10
+     минут от `ctx.periodEnd` (date math `||-10m`). Символы `'`, `|`, `"` и `+` закодированы (`%27`, `%7C`,
+     `%22`, `%2B`): иначе почтовый клиент обрезает ссылку на `|` и Discover падает с ошибкой
+     `rison decoder error: unmatched "'"`. Интервал привязан ко времени
+     алерта, поэтому ссылка работает и через несколько дней. Если Dashboards доступен не на
+     `localhost:5601`, замените адрес;
+   - `sample_documents` — документы бакета: сообщение с фразой и записи `WARN`/`ERROR` (до 10 штук: первые и
+     последние 5 в порядке индекса). Если у процесса больше 10 таких записей, сообщение с фразой может не
+     попасть в письмо — тогда все записи процесса видны по ссылке;
    - `{{#...}} ... {{/...}}` — цикл Mustache по списку.
 
 5. **Action configuration** → **Perform action**: выберите **Per alert**, в **Actionable alerts** оставьте
