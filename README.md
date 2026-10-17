@@ -86,6 +86,11 @@ Discover со всеми логами процесса за ±10 минут от
 OpenSearch, со ссылками на документацию и исходный код — в [MONITOR_QUERY.md](MONITOR_QUERY.md). Ручная
 настройка монитора через UI — в [DASHBOARDS_CONFIGURATION.md](DASHBOARDS_CONFIGURATION.md#6-монитор-alerting).
 
+Для Platform V Search, где в письме нельзя использовать `bucket_keys` и поля `_source`, есть отдельный вариант
+монитора [opensearch/init/monitor-pvs.json](opensearch/init/monitor-pvs.json): письмо со ссылкой на найденные
+документы по `_id`. `init.sh` его не применяет; подробности — в
+[MONITOR_QUERY.md](MONITOR_QUERY.md#9-вариант-для-platform-v-search).
+
 Письма смотрите в MailHog: http://localhost:8025. Монитор и алерты — в OpenSearch Dashboards → Alerting.
 
 > **Задержка алерта.** Минимальный интервал запуска монитора в OpenSearch Alerting — 1 минута, поэтому

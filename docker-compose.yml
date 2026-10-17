@@ -62,6 +62,7 @@ services:
     environment:
       - OPENSEARCH_URL=http://opensearch:9200
       - DASHBOARDS_URL=http://opensearch-dashboards:5601
+      - MONITOR_FILE=${MONITOR_FILE:-monitor-pvs.json}
     volumes:
       - ./opensearch:/opensearch:ro
     depends_on:

@@ -2,11 +2,14 @@
 # Идемпотентная настройка OpenSearch и OpenSearch Dashboards для демо.
 # Запускается контейнером opensearch-init; можно запускать и с хоста:
 #   OPENSEARCH_URL=http://localhost:9200 DASHBOARDS_URL=http://localhost:5601 sh opensearch/init/init.sh
+# MONITOR_FILE — файл монитора в каталоге init: monitor-pvs.json (по умолчанию, совместим с Platform V Search)
+# или monitor.json (письмо с process_id и полями документов).
 set -eu
 
 OPENSEARCH_URL=${OPENSEARCH_URL:-http://localhost:9200}
 DASHBOARDS_URL=${DASHBOARDS_URL:-http://localhost:5601}
 INIT_DIR=$(cd "$(dirname "$0")" && pwd)
+MONITOR_FILE=$INIT_DIR/${MONITOR_FILE:-monitor-pvs.json}
 DASHBOARDS_DIR=$(dirname "$INIT_DIR")/dashboards
 
 INDEX=app-logs
@@ -83,7 +86,7 @@ find_monitor() {
 }
 
 create_monitor() {
-  json POST "$OPENSEARCH_URL/_plugins/_alerting/monitors" -d @"$INIT_DIR/monitor.json" \
+  json POST "$OPENSEARCH_URL/_plugins/_alerting/monitors" -d @"$MONITOR_FILE" \
     | grep -o '"_id":"[^"]*"' | head -n 1 | cut -d '"' -f 4
 }
 
@@ -108,20 +111,20 @@ upsert_notification "$SMTP_ACCOUNT_ID" "$INIT_DIR/smtp-account.json"
 upsert_notification "$EMAIL_CHANNEL_ID" "$INIT_DIR/email-channel.json"
 
 # 3. Alerting: монитор на важную фразу вместе с WARN/ERROR в том же процессе
-monitor_type=$(grep -o '"monitor_type": *"[^"]*"' "$INIT_DIR/monitor.json" | cut -d '"' -f 4)
+monitor_type=$(grep -o '"monitor_type": *"[^"]*"' "$MONITOR_FILE" | cut -d '"' -f 4)
 existing=$(find_monitor)
 monitor_id=${existing%% *}
 if [ -z "$existing" ]; then
   monitor_id=$(create_monitor)
-  log "monitor '$MONITOR_NAME' created (id=$monitor_id)"
+  log "monitor '$MONITOR_NAME' created from $(basename "$MONITOR_FILE") (id=$monitor_id)"
 elif [ "${existing#* }" = "$monitor_type" ]; then
-  json PUT "$OPENSEARCH_URL/_plugins/_alerting/monitors/$monitor_id" -d @"$INIT_DIR/monitor.json" > /dev/null
-  log "monitor '$MONITOR_NAME' updated (id=$monitor_id)"
+  json PUT "$OPENSEARCH_URL/_plugins/_alerting/monitors/$monitor_id" -d @"$MONITOR_FILE" > /dev/null
+  log "monitor '$MONITOR_NAME' updated from $(basename "$MONITOR_FILE") (id=$monitor_id)"
 else
   # Alerting не умеет менять тип монитора через update, поэтому старый монитор пересоздаём.
   request DELETE "$OPENSEARCH_URL/_plugins/_alerting/monitors/$monitor_id" > /dev/null
   monitor_id=$(create_monitor)
-  log "monitor '$MONITOR_NAME' recreated as $monitor_type (id=$monitor_id)"
+  log "monitor '$MONITOR_NAME' recreated as $monitor_type from $(basename "$MONITOR_FILE") (id=$monitor_id)"
 fi
 
 # 4. Dashboards: index pattern, поиски, визуализации, дашборд

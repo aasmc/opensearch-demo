@@ -1,0 +1,145 @@
+{
+  "type": "monitor",
+  "monitor_type": "bucket_level_monitor",
+  "name": "important-message-monitor",
+  "enabled": true,
+  "schedule": {
+    "period": {
+      "interval": 1,
+      "unit": "MINUTES"
+    }
+  },
+  "inputs": [
+    {
+      "search": {
+        "indices": [
+          "app-logs"
+        ],
+        "query": {
+          "size": 0,
+          "derived": {
+            "has_important_phrase": {
+              "type": "long",
+              "script": {
+                "source": "emit(doc['event_message.keyword'].size() > 0 && doc['event_message.keyword'].value.toLowerCase().contains('this is a very important message') ? 1 : 0)"
+              }
+            },
+            "is_warn_or_error": {
+              "type": "long",
+              "script": {
+                "source": "emit(doc['log_level'].size() > 0 && (doc['log_level'].value == 'WARN' || doc['log_level'].value == 'ERROR') ? 1 : 0)"
+              }
+            }
+          },
+          "query": {
+            "bool": {
+              "filter": [
+                {
+                  "range": {
+                    "event_timestamp": {
+                      "from": "{{period_end}}||-2m",
+                      "to": "{{period_end}}",
+                      "include_lower": true,
+                      "include_upper": true,
+                      "format": "epoch_millis"
+                    }
+                  }
+                },
+                {
+                  "bool": {
+                    "should": [
+                      {
+                        "match_phrase": {
+                          "event_message": "This is a very important message"
+                        }
+                      },
+                      {
+                        "terms": {
+                          "log_level": [
+                            "WARN",
+                            "ERROR"
+                          ]
+                        }
+                      }
+                    ],
+                    "minimum_should_match": 1
+                  }
+                }
+              ]
+            }
+          },
+          "aggregations": {
+            "composite_agg": {
+              "composite": {
+                "size": 1000,
+                "sources": [
+                  {
+                    "process_id": {
+                      "terms": {
+                        "field": "process_id"
+                      }
+                    }
+                  }
+                ]
+              },
+              "aggregations": {
+                "important": {
+                  "max": {
+                    "field": "has_important_phrase"
+                  }
+                },
+                "problems": {
+                  "max": {
+                    "field": "is_warn_or_error"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "bucket_level_trigger": {
+        "name": "important-message-with-problems",
+        "severity": "1",
+        "condition": {
+          "buckets_path": {
+            "important": "important",
+            "problems": "problems"
+          },
+          "parent_bucket_path": "composite_agg",
+          "script": {
+            "source": "params.important > 0 && params.problems > 0",
+            "lang": "painless"
+          }
+        },
+        "actions": [
+          {
+            "name": "send-email",
+            "destination_id": "important-message-email",
+            "subject_template": {
+              "source": "[OpenSearch] Important message with WARN/ERROR detected",
+              "lang": "mustache"
+            },
+            "message_template": {
+              "source": "Monitor {{ctx.monitor.name}} found an important message and WARN/ERROR records in the logs of the same process.\n\nTrigger: {{ctx.trigger.name}} (severity {{ctx.trigger.severity}})\nDetected at: {{ctx.periodEnd}}\n{{#ctx.newAlerts}}\n----------------------------------------\nMatched log records (index/doc id):\n{{#sample_documents}}\n  {{_index}}/{{_id}}\n{{/sample_documents}}\nOpen these records in Discover (process_id and messages are shown there):\nhttp://localhost:5601/app/data-explorer/discover#?_a=(discover:(columns:!(process_id,log_level,service_name,event_message),sort:!()),metadata:(indexPattern:app-logs,view:discover))&_g=(filters:!(),time:(from:%27{{ctx.periodEnd}}%7C%7C-10m%27,to:%27{{ctx.periodEnd}}%7C%7C%2B10m%27))&_q=(filters:!(),query:(language:lucene,query:%27_id:({{#sample_documents}}%22{{_id}}%22%20{{/sample_documents}})%27))\n{{/ctx.newAlerts}}",
+              "lang": "mustache"
+            },
+            "action_execution_policy": {
+              "action_execution_scope": {
+                "per_alert": {
+                  "actionable_alerts": [
+                    "NEW"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
