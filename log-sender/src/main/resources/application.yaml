@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: log-sender
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+
+log-sender:
+  opensearch-url: ${OPENSEARCH_URL:http://localhost:9200}
+  index: app-logs
+  batch-size: 10
+  important-every-nth-batch: 10
+  fixed-rate-ms: 1000
+  connect-timeout: 500ms
+  read-timeout: 900ms
+  scheduling:
+    enabled: true
+  service-names:
+    - order-service
+    - payment-service
+    - inventory-service
+    - notification-service
+    - auth-service

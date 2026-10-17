@@ -1,0 +1,15 @@
+{
+  "name": "Important message email",
+  "description": "Email-канал для алертов о важных сообщениях в логах",
+  "config_type": "email",
+  "is_enabled": true,
+  "email": {
+    "email_account_id": "mailhog-smtp",
+    "recipient_list": [
+      {
+        "recipient": "oncall@opensearch-demo.local"
+      }
+    ],
+    "email_group_id_list": []
+  }
+}

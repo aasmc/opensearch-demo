@@ -1,0 +1,86 @@
+name: opensearch-demo
+
+services:
+  opensearch:
+    image: opensearchproject/opensearch:${OPENSEARCH_VERSION}
+    environment:
+      - cluster.name=opensearch-demo
+      - node.name=opensearch
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      # Демо-стенд: security plugin отключён (без TLS и логина). Не использовать в prod.
+      - plugins.security.disabled=true
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    ports:
+      - "${OPENSEARCH_PORT}:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:${OPENSEARCH_DASHBOARDS_VERSION}
+    environment:
+      - OPENSEARCH_HOSTS=["http://opensearch:9200"]
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    ports:
+      - "${OPENSEARCH_DASHBOARDS_PORT}:5601"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:5601/api/status | grep -q '\"state\":\"green\"' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  mailhog:
+    image: mailhog/mailhog:${MAILHOG_VERSION}
+    # Официальный образ MailHog собран только под amd64; на Apple Silicon работает через эмуляцию.
+    platform: linux/amd64
+    ports:
+      - "${MAILHOG_SMTP_PORT}:1025"
+      - "${MAILHOG_UI_PORT}:8025"
+
+  # Одноразовая настройка: шаблон индекса, каналы уведомлений, монитор, saved objects дашборда.
+  opensearch-init:
+    image: curlimages/curl:${CURL_VERSION}
+    entrypoint: ["/bin/sh", "/opensearch/init/init.sh"]
+    environment:
+      - OPENSEARCH_URL=http://opensearch:9200
+      - DASHBOARDS_URL=http://opensearch-dashboards:5601
+    volumes:
+      - ./opensearch:/opensearch:ro
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      opensearch-dashboards:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+    restart: "no"
+
+  log-sender:
+    build: ./log-sender
+    environment:
+      - OPENSEARCH_URL=http://opensearch:9200
+    depends_on:
+      opensearch-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  opensearch-data:

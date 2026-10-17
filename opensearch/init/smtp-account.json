@@ -1,0 +1,12 @@
+{
+  "name": "MailHog SMTP",
+  "description": "Тестовый SMTP-сервер MailHog (без аутентификации и TLS)",
+  "config_type": "smtp_account",
+  "is_enabled": true,
+  "smtp_account": {
+    "host": "mailhog",
+    "port": 1025,
+    "method": "none",
+    "from_address": "alerts@opensearch-demo.local"
+  }
+}

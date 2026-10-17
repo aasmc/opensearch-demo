@@ -1,0 +1,55 @@
+{
+  "type": "monitor",
+  "monitor_type": "doc_level_monitor",
+  "name": "important-message-monitor",
+  "enabled": true,
+  "schedule": {
+    "period": { "interval": 1, "unit": "MINUTES" }
+  },
+  "inputs": [
+    {
+      "doc_level_input": {
+        "description": "Сообщения логов, содержащие фразу 'This is a very important message'",
+        "indices": ["app-logs"],
+        "queries": [
+          {
+            "id": "important-phrase",
+            "name": "important-phrase",
+            "query": "event_message:\"This is a very important message\"",
+            "tags": ["important"]
+          }
+        ]
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "document_level_trigger": {
+        "name": "important-message-found",
+        "severity": "1",
+        "condition": {
+          "script": { "source": "query[name=important-phrase]", "lang": "painless" }
+        },
+        "actions": [
+          {
+            "name": "send-email",
+            "destination_id": "important-message-email",
+            "subject_template": {
+              "source": "[OpenSearch] Important message detected",
+              "lang": "mustache"
+            },
+            "message_template": {
+              "source": "Monitor {{ctx.monitor.name}} found an important message in the logs.\n\nTrigger: {{ctx.trigger.name}} (severity {{ctx.trigger.severity}})\nDetected at: {{ctx.periodEnd}}\n{{#ctx.alerts}}{{#sample_documents}}\n----------------------------------------\nprocess_id:      {{_source.process_id}}\nservice_name:    {{_source.service_name}}\nevent_timestamp: {{_source.event_timestamp}}\nevent_message:   {{_source.event_message}}\nindex/doc id:    {{_index}}/{{_id}}\n{{/sample_documents}}{{/ctx.alerts}}",
+              "lang": "mustache"
+            },
+            "action_execution_policy": {
+              "action_execution_scope": {
+                "per_alert": { "actionable_alerts": [] }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
